@@ -1,0 +1,13 @@
+base
+lattice
+ggplot2
+caret
+plyr
+dplyr
+RGtk2
+rattle
+manipulate
+DescTools
+randomForest
+class
+pROC

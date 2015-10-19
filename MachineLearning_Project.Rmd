@@ -1,0 +1,204 @@
+---
+title: "Machine Learning Course Project"
+author: "Masswear"
+date: "17. Oktober 2015"
+output: html_document
+---
+##Executive Summary
+
+This project reports on the creation of an algorithm to predict the manner in which a weight-lifting exercise is performed. The model used raw sensor data from sensors attached to the body of subjects. From 52 possible predictors, 11 were selected for modeling after recursive feature elimination and correlation exclusion. A random forest model proved highly accurate with an out of sample error of 2%. 
+
+##Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+
+The goal of this project was to use data from sensors on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did a barbell lift.  
+
+This write-up describes the model-building process, its cross validation, the expected out of sample error, and the choices made.
+
+##Methods
+All analysis were performed inside of RStudio (version 0.99.486) on a Microsoft Windows 8.1 Pro machine (Intel Core i7-5820K CPU @ 3.30GHz, 6 cores, 12 logical processors, 15MB L3 cache, with 16 GB DDR4-DIMM SDRAM @ 2133 MHz).
+
+
+```{R}
+Sys.info()[1:5]
+R.Version()[c(1,13)]
+```
+
+Several packages were used for data processing and machine learning
+
+```{R, message = FALSE}
+library(caret)
+library(plyr)
+library(dplyr)
+library(rattle)
+library(DescTools)
+library(randomForest)
+library(class)
+library(pROC)
+```
+
+###Data 
+
+The training data for this project are available here: 
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: 
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har.  
+
+```{r, cache=TRUE}
+##download and import the training and test data. 
+url_train <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+url_test <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+training <- read.csv(url(url_train), sep = ",", na.strings = c("NA", "#DIV/0!", ""), stringsAsFactors = FALSE)
+test <- read.csv(url(url_test), sep = ",", na.strings = c("NA", "#DIV/0!", ""), stringsAsFactors = FALSE)
+```
+
+##Results
+###Exploratory Data Analysis
+
+Data was explored to identify its structure, available variables, and possible caveats.
+The first 7 variables contained identifiers such as sample ID, user name, and timestamps.
+The next 152 variables contained the raw data and summaries calculated by the original authors. The last variable contained the classe that describes the manner in which the users performed the exercise.
+
+Variables containing missing values were excluded from the model building process. This affected mainly the summary variables calculated by the creators of the dataset. Contrary to the original approach by Velloso et al., I used the raw data to predict the outcome.
+When necessary, variable classes were adjusted to fit the desired class (e.g., factor). 
+
+```{r}
+#transform classe and user name to factor in training set
+training$classe <- as.factor(training$classe)
+training$user_name <- as.factor(training$user_name)
+
+#remove missing values
+training_clean <- training[, colSums(is.na(training)) == 0]
+test_clean <- test[, colSums(is.na(test)) == 0]
+```
+
+The final dataset used for modelling contained 53 variables inlcuding the outcome variable "classe".
+
+###Cross validation
+The training set was partitioned into 2 subsets for cross validation, assigning 60% to a "cross-train" set and the remaining 40% to a "cross-test" set.
+
+```{r}
+set.seed(1801)
+crossvalid <- createDataPartition(y = training_clean$classe, p = 0.6, list = FALSE)
+cross_train <- training_clean[crossvalid,]
+cross_test <- training_clean[-crossvalid,]
+```
+
+###Feature selection
+To avoid overfitting, a recursive feature elimination (rfe) process was used to select the features providing the highest accuracy. A 2-fold cross-validation with no repeats was used to improve out-of-sample accuracy.
+
+```{r, cache=TRUE}
+set.seed(1801)
+# define the control using a random forest selection function
+control <- rfeControl(functions=rfFuncs, method="cv", number=2)
+# run the RFE algorithm
+start_time_rfe <- Sys.time()
+results <- rfe(cross_train[,7:59], cross_train[,60], sizes=c(7:59), rfeControl=control, verbose=TRUE,
+               allowParallel=TRUE)
+end_time_rfe <- Sys.time()
+saveRDS(results, "results_rfe.Rds")
+predictors(results)
+```
+
+The top 5 predictors were *roll_belt*, *magnet_dumbbell_z*, *yaw_belt*, *magnet_dumbbell_y*, and *pitch_belt*.
+
+Recursive feature elimination suggested that the best accuracy was achieved with 38 variables. However, accuracy was over 97.5% with only 13 features (Figure 1), which should be sufficient for this purpose.
+
+```{r, echo = FALSE}
+# plot the results
+plot(results, type=c("g", "o"), main = "Figure 1: Accuracy versus number of variables")
+```
+
+I only selected the top 13 variables to continue with modeling.
+
+```{r}
+rfe_predictors <- predictors(results)
+cross_train_rfe <- cross_train %>% select(match(rfe_predictors[1:13],names(.)))
+```
+
+To identify redundant features, I calculated a correlation matrix of the remaining variables and excluded all variables with a correlation above 0.75 from the training set.
+
+```{R}
+# calculate correlation matrix
+correlationMatrix <- cor(cross_train_rfe)
+# set diagonal to 0
+diag(correlationMatrix) <- 0
+# identify variables with correlation > 0.75
+which(abs(correlationMatrix)>0.75, arr.ind=TRUE)
+```
+
+Apparently, *roll_belt* correlated with *yaw_belt* and *magnet_dumbbell_y* correlated with *magnet_dumbbell_x*. Since *roll_belt* and *magnet_dumbbell_y* showed a higher importance, I excluded *yaw_belt* and *magnet_dumbbell_x*, resulting in 11 remaining predictors.
+
+```{r}
+# remove highly correlated features from training set
+cross_train_rfe_cor <- cross_train_rfe[-c(3, 10)]
+```
+
+
+###Model building
+
+The final model was built using random forests and 10-fold cross-validation on the remaining 11 features.
+
+```{r, cache=TRUE}
+start_time_rf <- Sys.time()
+set.seed(1801)
+model_rf <- train(cross_train_rfe_cor,
+                  cross_train$classe,
+                  method="rf",
+                  trControl=trainControl(method="cv",number=10),
+                  prox=TRUE,
+                  verbose=TRUE,
+                  allowParallel=TRUE)
+end_time_rf <- Sys.time()
+saveRDS(model_rf, "model_rf.Rds")
+```
+
+
+###Out of sample error
+
+To predict the out of sample error, I applied the random forests model to the cross-test data and calculated a confusion matrix of the predicted values versus the true values of the outcome.
+
+```{r}
+predictions <- predict(model_rf, newdata=cross_test)
+conf_Mat <- confusionMatrix(predictions, cross_test$classe)
+conf_Mat
+```
+
+The out of sample accuracy of the model was 98%, giving an out of sample error of 1 - accuracy = 2%.
+
+```{r}
+missClass <-  function(values, predicted) {
+  sum(predicted != values) / length(values)
+}
+OOS_errRate <- missClass(cross_test$classe, predictions)
+OOS_errRate
+```
+
+##Discussion
+
+Using raw sensor data to predict the manner in which an exercise is performed proved highly accurate (> 98%). The feature selection process employing recursive feature elimination (rfe) followed by correlation exclusion was effective to reduce the number of features needed for accurate predictions. Hovever, rfe was very time consuming to compute. Even with a relative small 2-fold cross-validation, the process took `r round(end_time_rfe - start_time_rfe, 0)` minutes to complete. A faster approach may have been the generation of a quick random forest model and arbitrary selection of the top *n* predictors. However, this approach would not allow for objective justification of *n*. 
+
+Random sampling  for cross-validation may not have been the most appropriate choice for this dataset, since measurments were not independent but were essentially time-series. One could imagine that accounting for this would allow to optimize the model even further.
+
+The random forests approach for modelling provided an accurate model but was rather time-consuming to generate (`r round(end_time_rf - start_time_rf, 0)` minutes). Reducing the number of folds for the cross-validation would have reduced this time. 
+
+##Credits
+
+This project is part of the [Practical Machine Learning Course](https://www.coursera.org/course/predmachlearn) by Jeff Leek, PhD, Roger D. Peng, PhD, Brian Caffo, PhD, offered by Johns Hopkins Bloomberg School of Public Health as part of their Data Science Specialization on Coursera.
+
+The data used in this assignment was originally published here:
+[Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.](http://groupware.les.inf.puc-rio.br/har#wle_paper_section#ixzz3owH3ewjH)
+
+
+
+
+
+
+

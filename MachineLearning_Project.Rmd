@@ -6,7 +6,7 @@ output: html_document
 ---
 ##Executive Summary
 
-This project reports on the creation of an algorithm to predict the manner in which a weight-lifting exercise is performed. The model used raw sensor data from sensors attached to the body of subjects. From 52 possible predictors, 11 were selected for modeling after recursive feature elimination and correlation exclusion. A random forest model proved highly accurate with an out of sample error of 2%. 
+This project reports on the creation of an algorithm to predict the manner in which a weight-lifting exercise is performed. The model used raw sensor data from sensors attached to the body of subjects. From 52 possible predictors, 15 were selected for modeling after recursive feature elimination and correlation exclusion. A random forest model proved highly accurate with an out-of-sample error of 7.4%. 
 
 ##Background
 
@@ -14,7 +14,7 @@ Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible t
 
 The goal of this project was to use data from sensors on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did a barbell lift.  
 
-This write-up describes the model-building process, its cross validation, the expected out of sample error, and the choices made.
+This write-up describes the model-building process, its cross validation, the expected out-of-sample error, and the choices made.
 
 ##Methods
 All analysis were performed inside of RStudio (version 0.99.486) on a Microsoft Windows 8.1 Pro machine (Intel Core i7-5820K CPU @ 3.30GHz, 6 cores, 12 logical processors, 15MB L3 cache, with 16 GB DDR4-DIMM SDRAM @ 2133 MHz).
@@ -66,7 +66,8 @@ Data was explored to identify its structure, available variables, and possible c
 The first 7 variables contained identifiers such as sample ID, user name, and timestamps.
 The next 152 variables contained the raw data and summaries calculated by the original authors. The last variable contained the classe that describes the manner in which the users performed the exercise.
 
-Variables containing missing values were excluded from the model building process. This affected mainly the summary variables calculated by the creators of the dataset. Contrary to the original approach by Velloso et al., I used the raw data to predict the outcome.
+Variables containing missing values were excluded from the model building process. This affected mainly the summary variables calculated by the creators of the dataset. Contrary to the original approach by Velloso et al., 
+summary variables could not be used for prediction because the test set for evaluation did not contain any summary values. As a result, the outcome was predicted from raw data.
 When necessary, variable classes were adjusted to fit the desired class (e.g., factor). 
 
 ```{r}
@@ -82,13 +83,19 @@ test_clean <- test[, colSums(is.na(test)) == 0]
 The final dataset used for modelling contained 53 variables inlcuding the outcome variable "classe".
 
 ###Cross validation
-The training set was partitioned into 2 subsets for cross validation, assigning 60% to a "cross-train" set and the remaining 40% to a "cross-test" set.
+The training set was partitioned into 2 subsets for cross validation, assigning 60% to a "cross-train" set and the remaining 40% to a "cross-test" set. To account for the time-dependence, data were split on the variable *num_window*, allowing to partition the data into time slices.
 
 ```{r}
 set.seed(1801)
-crossvalid <- createDataPartition(y = training_clean$classe, p = 0.6, list = FALSE)
-cross_train <- training_clean[crossvalid,]
-cross_test <- training_clean[-crossvalid,]
+#create data frame with uniqe values of variable num_window and classe
+window_classe <- training_clean %>% group_by(num_window) %>% select(60) %>% summarise_each(funs(unique))
+#Sample 60% of num_window without replacement within the levels of classe
+crossval <- createDataPartition(y = window_classe$classe, p = 0.60, list = FALSE)
+crossval_sample <- window_classe[crossval,]
+#Create cross-train set including all measurements where num_window equals the sample
+cross_train <- training_clean[training_clean$num_window %in% crossval_sample$num_window,]
+#create cross-test set using remaining num_windows
+cross_test <- training_clean[!(training_clean$num_window %in% crossval_sample$num_window),]
 ```
 
 ###Feature selection
@@ -100,27 +107,27 @@ set.seed(1801)
 control <- rfeControl(functions=rfFuncs, method="cv", number=2)
 # run the RFE algorithm
 start_time_rfe <- Sys.time()
-results <- rfe(cross_train[,7:59], cross_train[,60], sizes=c(7:59), rfeControl=control, verbose=TRUE,
+results <- rfe(cross_train[,8:59], cross_train[,60], sizes=c(8:59), rfeControl=control, verbose=TRUE,
                allowParallel=TRUE)
 end_time_rfe <- Sys.time()
 saveRDS(results, "results_rfe.Rds")
 predictors(results)
 ```
 
-The top 5 predictors were *roll_belt*, *magnet_dumbbell_z*, *yaw_belt*, *magnet_dumbbell_y*, and *pitch_belt*.
+The top 5 predictors were *roll_belt*, *magnet_dumbbell_z*, *yaw_belt*, *magnet_dumbbell_y*, and *pitch_forearm*.
 
-Recursive feature elimination suggested that the best accuracy was achieved with 38 variables. However, accuracy was over 97.5% with only 13 features (Figure 1), which should be sufficient for this purpose.
+Recursive feature elimination suggested that the best accuracy was achieved with 32 variables (accuracy of 99.2%. However, accuracy was 99.0% with only 18 features (Figure 1). Addition of more features did not increase accuracy significantly.
 
 ```{r, echo = FALSE}
 # plot the results
 plot(results, type=c("g", "o"), main = "Figure 1: Accuracy versus number of variables")
 ```
 
-I only selected the top 13 variables to continue with modeling.
+I only selected the top 18 variables to continue with modeling.
 
 ```{r}
 rfe_predictors <- predictors(results)
-cross_train_rfe <- cross_train %>% select(match(rfe_predictors[1:13],names(.)))
+cross_train_rfe <- cross_train %>% select(match(rfe_predictors[1:18],names(.)))
 ```
 
 To identify redundant features, I calculated a correlation matrix of the remaining variables and excluded all variables with a correlation above 0.75 from the training set.
@@ -134,17 +141,17 @@ diag(correlationMatrix) <- 0
 which(abs(correlationMatrix)>0.75, arr.ind=TRUE)
 ```
 
-Apparently, *roll_belt* correlated with *yaw_belt* and *magnet_dumbbell_y* correlated with *magnet_dumbbell_x*. Since *roll_belt* and *magnet_dumbbell_y* showed a higher importance, I excluded *yaw_belt* and *magnet_dumbbell_x*, resulting in 11 remaining predictors.
+Apparently, *roll_belt* correlated with *yaw_belt*, *magnet_dumbbell_y* correlated with *magnet_dumbbell_x*, and *magnet_belt_z* correlated with *magnet_belt_y*. Since *roll_belt*, *magnet_dumbbell_y*, and *magnet_belt_y* showed a higher importance, I excluded *yaw_belt*, *magnet_dumbbell_x*, and *magnet_belt_z*, resulting in 15 remaining predictors.
 
 ```{r}
 # remove highly correlated features from training set
-cross_train_rfe_cor <- cross_train_rfe[-c(3, 10)]
+cross_train_rfe_cor <- cross_train_rfe[-c(3, 9, 14)]
 ```
 
 
 ###Model building
 
-The final model was built using random forests and 10-fold cross-validation on the remaining 11 features.
+The final model was built using random forests and 10-fold cross-validation on the remaining 15 features.
 
 ```{r, cache=TRUE}
 start_time_rf <- Sys.time()
@@ -161,9 +168,9 @@ saveRDS(model_rf, "model_rf.Rds")
 ```
 
 
-###Out of sample error
+###out-of-sample error
 
-To predict the out of sample error, I applied the random forests model to the cross-test data and calculated a confusion matrix of the predicted values versus the true values of the outcome.
+To predict the out-of-sample error, I applied the random forests model to the cross-test data and calculated a confusion matrix of the predicted values versus the true values of the outcome.
 
 ```{r}
 predictions <- predict(model_rf, newdata=cross_test)
@@ -171,7 +178,7 @@ conf_Mat <- confusionMatrix(predictions, cross_test$classe)
 conf_Mat
 ```
 
-The out of sample accuracy of the model was 98%, giving an out of sample error of 1 - accuracy = 2%.
+The out-of-sample accuracy of the model was `r round(conf_Mat$overall[1]*100, 1)`%, giving an out-of-sample error of 1 - accuracy = `r (100 - round(conf_Mat$overall[1]*100, 1))`%.
 
 ```{r}
 missClass <-  function(values, predicted) {
@@ -183,11 +190,11 @@ OOS_errRate
 
 ##Discussion
 
-Using raw sensor data to predict the manner in which an exercise is performed proved highly accurate (> 98%). The feature selection process employing recursive feature elimination (rfe) followed by correlation exclusion was effective to reduce the number of features needed for accurate predictions. Hovever, rfe was very time consuming to compute. Even with a relative small 2-fold cross-validation, the process took `r round(end_time_rfe - start_time_rfe, 0)` minutes to complete. A faster approach may have been the generation of a quick random forest model and arbitrary selection of the top *n* predictors. However, this approach would not allow for objective justification of *n*. 
+Using raw sensor data to predict the manner in which an exercise is performed proved highly accurate (> 90%). The feature selection process employing recursive feature elimination (rfe) followed by correlation exclusion was effective to reduce the number of features needed for accurate predictions. Hovever, rfe was very time consuming to compute. Even with a relative small 2-fold cross-validation, the process took `r round(end_time_rfe - start_time_rfe, 0)` minutes to complete. A faster approach may have been the generation of a quick random forest model and arbitrary selection of the top *n* predictors. However, this approach would not allow for objective justification of *n*. 
 
-Random sampling  for cross-validation may not have been the most appropriate choice for this dataset, since measurments were not independent but were essentially time-series. One could imagine that accounting for this would allow to optimize the model even further.
+The random forests approach for modelling provided an accurate model but was rather time-consuming to generate (`r round(end_time_rf - start_time_rf, 0)` minutes). Reducing the number of folds for the cross-validation would have reduced this time.
 
-The random forests approach for modelling provided an accurate model but was rather time-consuming to generate (`r round(end_time_rf - start_time_rf, 0)` minutes). Reducing the number of folds for the cross-validation would have reduced this time. 
+Random forests estimate an out-of-sample error internally during creation, using bootstrapped samples. This out-of-bag (OOB) error should give an unbiased estimate of the out-of-sample error without the need of cross-validation. However, bootstrapping samples do not account for time dependence. The OOB given by the randomForest function was `r round(model_rf$finalModel$err.rate[model_rf$finalModel$ntree] * 100, 1)`%, giving a 10-fold lower value comparing to our estimated error based on cross-validation accounting for time-dependence. This illustrates that the sampling process used for cross-validation is very important, especially when working with time-series data.
 
 ##Credits
 
